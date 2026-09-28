@@ -1,30 +1,45 @@
 import { useRef } from "react";
 import { apiUrl } from "../api.js";
 
-export default function ResumeUpload({ onExtracted, onRemove, fileName, preview, parsing, setParsing, setError }) {
+export default function ResumeUpload({ onExtracted, onFileSelected, onRemove, fileName, preview, parsing, setParsing, setError }) {
   const inputRef = useRef(null);
 
   const handleFile = async (file) => {
     if (!file) return;
+    if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) {
+      setError("Please select a PDF file.");
+      return;
+    }
+    console.info("[resume-upload] selected PDF:", file.name);
+    onFileSelected(file);
     setError("");
     setParsing(true);
     try {
       const form = new FormData();
       form.append("resume", file);
-      const res = await fetch(apiUrl("/api/parse-pdf"), {
+      const parseUrl = apiUrl("/api/parse-pdf");
+      console.info("[resume-upload] parse request started:", parseUrl);
+      const res = await fetch(parseUrl, {
         method: "POST",
         body: form,
       });
-      const data = await res.json();
+      console.info("[resume-upload] parse response status:", res.status);
+      const data = await res.json().catch(() => null);
       if (!res.ok) {
-        throw new Error(data.error || "Failed to parse PDF");
+        throw new Error(data?.error || `PDF upload failed (HTTP ${res.status})`);
       }
-      const text = data.text;
+      const text = typeof data?.text === "string" ? data.text : "";
+      console.info("[resume-upload] parsed text length:", text.length);
+      if (!text.trim()) {
+        throw new Error("The server could not extract text from this PDF.");
+      }
       const previewSlice = text.length > 600 ? `${text.slice(0, 600)}…` : text;
       onExtracted(text, previewSlice, file.name);
     } catch (e) {
-      setError(e.message || "Could not read PDF");
-      onExtracted("", "");
+      onExtracted("", "", file.name);
+      setError(e instanceof TypeError
+        ? "Could not reach the PDF parser. Check that the backend is running and try again."
+        : e.message || "Could not read this PDF. Try another file.");
     } finally {
       setParsing(false);
       if (inputRef.current) inputRef.current.value = "";

@@ -16,6 +16,9 @@ const OLLAMA_URL = (process.env.OLLAMA_URL || "http://127.0.0.1:11434").replace(
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "qwen2.5-coder:3b";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || "gemini-3.7-flash";
+const GEMINI_RETRY_DELAYS_MS = [2000, 4000, 8000];
+const GEMINI_RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const allowedOrigins = new Set(
   (process.env.CORS_ORIGINS || "http://localhost:5173")
     .split(",")
@@ -142,13 +145,9 @@ async function callOllama(prompt) {
   return data.response;
 }
 
-async function callGemini(prompt) {
-  if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is not configured");
-  }
-
+async function callGeminiModel(prompt, model) {
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
     {
       method: "POST",
       headers: {
@@ -159,16 +158,18 @@ async function callGemini(prompt) {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: {
           responseMimeType: "application/json",
-          temperature: 0.3,
           maxOutputTokens: 2048,
         },
       }),
     }
   );
 
+  console.log(`Gemini model ${model} returned HTTP ${response.status}`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.error?.message || `Gemini request failed (${response.status})`);
+    const error = new Error(data.error?.message || `Gemini request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
 
   const text = data.candidates?.[0]?.content?.parts
@@ -179,6 +180,46 @@ async function callGemini(prompt) {
     throw new Error("Gemini returned an empty response");
   }
   return text;
+}
+
+async function retryWithBackoff(operation, model) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      const delay = GEMINI_RETRY_DELAYS_MS[attempt];
+      if (!GEMINI_RETRYABLE_STATUSES.has(error.status) || delay === undefined) {
+        throw error;
+      }
+
+      console.warn(
+        `Gemini model ${model} retry ${attempt + 1}/${GEMINI_RETRY_DELAYS_MS.length} ` +
+          `after HTTP ${error.status} in ${delay / 1000}s`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
+async function callGemini(prompt) {
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not configured");
+  }
+
+  console.log(`Attempting Gemini primary model: ${GEMINI_MODEL}`);
+  try {
+    return await retryWithBackoff(() => callGeminiModel(prompt, GEMINI_MODEL), GEMINI_MODEL);
+  } catch (primaryError) {
+    if (!GEMINI_RETRYABLE_STATUSES.has(primaryError.status)) {
+      throw primaryError;
+    }
+
+    console.warn(
+      `Gemini primary model ${GEMINI_MODEL} exhausted retries after HTTP ${primaryError.status}; ` +
+        `attempting fallback model: ${GEMINI_FALLBACK_MODEL}`
+    );
+    return callGeminiModel(prompt, GEMINI_FALLBACK_MODEL);
+  }
 }
 
 async function callAIProvider(prompt) {
@@ -210,11 +251,13 @@ app.get("/api/health", async (_req, res) => {
 
 app.post("/api/parse-pdf", upload.single("resume"), async (req, res) => {
   try {
+    console.info("[parse-pdf] file received:", Boolean(req.file), "filename:", req.file?.originalname || null);
     if (!req.file) {
       return res.status(400).json({ error: "No PDF file uploaded" });
     }
     const data = await pdf(req.file.buffer);
     const text = (data.text || "").trim();
+    console.info("[parse-pdf] extracted text length:", text.length);
     if (!text || text.length < 20) {
       return res.status(400).json({
         error: "Could not extract meaningful text from this PDF. Try a text-based PDF, not a scanned image.",
@@ -245,7 +288,11 @@ app.post("/api/analyze", async (req, res) => {
     try {
       rawResponse = await callAIProvider(prompt);
     } catch (providerErr) {
-      console.error(`${AI_PROVIDER} error:`, providerErr);
+      if (AI_PROVIDER === "gemini") {
+        console.error("Gemini request failed", providerErr.status ? `HTTP ${providerErr.status}` : "without an HTTP status");
+      } else {
+        console.error(`${AI_PROVIDER} error:`, providerErr);
+      }
       return res.status(503).json({
         error: providerErr.message || "AI provider request failed.",
       });

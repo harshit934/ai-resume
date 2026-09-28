@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { apiUrl } from "./api.js";
 import ResumeUpload from "./components/ResumeUpload.jsx";
 import JobDescription from "./components/JobDescription.jsx";
@@ -8,6 +8,7 @@ import ResultsDashboard from "./components/ResultsDashboard.jsx";
 export default function App() {
   const [resumeText, setResumeText] = useState("");
   const [resumePreview, setResumePreview] = useState("");
+  const [resumeFile, setResumeFile] = useState(null);
   const [resumeFileName, setResumeFileName] = useState("");
   const [jobDescription, setJobDescription] = useState("");
   const [analysis, setAnalysis] = useState(null);
@@ -15,7 +16,12 @@ export default function App() {
   const [parsingPdf, setParsingPdf] = useState(false);
   const [error, setError] = useState("");
 
+  useEffect(() => {
+    console.info("[resume-state] resumeText updated; length:", resumeText.length);
+  }, [resumeText]);
+
   const handleResumeExtracted = useCallback((text, preview, fileName = "") => {
+    console.info("[resume-state] parsed text received; length:", text.length);
     setResumeText(text);
     setResumePreview(preview);
     setResumeFileName(fileName);
@@ -26,6 +32,7 @@ export default function App() {
   const handleRemoveResume = () => {
     setResumeText("");
     setResumePreview("");
+    setResumeFile(null);
     setResumeFileName("");
     setAnalysis(null);
     setError("");
@@ -102,6 +109,7 @@ export default function App() {
         {!analysis && <section className="input-grid">
           <ResumeUpload
             onExtracted={handleResumeExtracted}
+            onFileSelected={setResumeFile}
             onRemove={handleRemoveResume}
             fileName={resumeFileName}
             preview={resumePreview}
